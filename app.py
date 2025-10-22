@@ -1,21 +1,19 @@
 # app.py
 import os
 import json
-from datetime import datetime
-
 import requests
 import streamlit as st
-import plotly.express as px  # noqa: F401 (используется в utils)
-import pandas as pd         # noqa: F401 (используется в utils)
+import plotly.express as px  # noqa: F401
+import pandas as pd          # noqa: F401
 
-from config import PLAYLISTS, APP_CONFIG, DEEPSEEK_CONFIG, UI_CONFIG
+from config import PLAYLISTS, APP_CONFIG, DEEPSEEK_CONFIG, UI_CONFIG, SUPABASE_URL, SUPABASE_ANON_KEY
 from utils import (
     compare_answers, calculate_score, generate_progress_report,
     get_subject_emoji, SessionManager, create_progress_chart_data,
     log_user_action
 )
 
-# set_page_config — ДОЛЖЕН быть самым первым вызовом Streamlit
+# set_page_config — ПЕРВЫЙ вызов Streamlit
 st.set_page_config(
     page_title=UI_CONFIG["page_title"],
     page_icon=UI_CONFIG["page_icon"],
@@ -23,7 +21,7 @@ st.set_page_config(
     initial_sidebar_state=UI_CONFIG["initial_sidebar_state"],
 )
 
-# ==== РЕЗОЛВИМ API-ключи ПОСЛЕ set_page_config ====
+# === Ключи ===
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 try:
@@ -31,6 +29,11 @@ try:
         YOUTUBE_API_KEY = st.secrets["YOUTUBE_API_KEY"]
     if (not DEEPSEEK_API_KEY) and hasattr(st, "secrets") and "DEEPSEEK_API_KEY" in st.secrets:
         DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
+    # Подхват Supabase из secrets при необходимости
+    if (not SUPABASE_URL) and hasattr(st, "secrets") and "SUPABASE_URL" in st.secrets:
+        os.environ["SUPABASE_URL"] = st.secrets["SUPABASE_URL"]
+    if (not SUPABASE_ANON_KEY) and hasattr(st, "secrets") and "SUPABASE_ANON_KEY" in st.secrets:
+        os.environ["SUPABASE_ANON_KEY"] = st.secrets["SUPABASE_ANON_KEY"]
 except Exception:
     pass
 
@@ -40,7 +43,7 @@ if not YOUTUBE_API_KEY:
 
 DEEPSEEK_ENABLED = bool(DEEPSEEK_API_KEY)
 
-# ==== MathJax ====
+# MathJax
 st.markdown("""
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/MathJax.js?config=TeX-MML-AM_CHTML"></script>
 <script>
@@ -51,7 +54,7 @@ st.markdown("""
 </script>
 """, unsafe_allow_html=True)
 
-# ==== CSS ====
+# CSS
 st.markdown("""
 <style>
 .main-header { text-align:center; padding:2rem; background:linear-gradient(90deg,#667eea 0%,#764ba2 100%); border-radius:10px; color:#fff; margin-bottom:2rem; }
@@ -69,8 +72,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-
-# ============== БЭКЕНД: DeepSeek клиент ==============
+# ================== Бэкенд (DeepSeek/YouTube) ==================
 class EnhancedAITutor:
     def __init__(self):
         self.youtube_api_key = YOUTUBE_API_KEY
@@ -80,7 +82,6 @@ class EnhancedAITutor:
         self.deepseek_config = DEEPSEEK_CONFIG
         self.ui_config = UI_CONFIG
 
-    # ---- YouTube ----
     def get_playlist_videos(self, playlist_id: str):
         if not (isinstance(playlist_id, str) and (playlist_id.startswith("PL") or playlist_id.startswith("UU") or playlist_id.startswith("P"))):
             st.error(f"Неверный формат ID плейлиста: {playlist_id}")
@@ -127,14 +128,12 @@ class EnhancedAITutor:
             log_user_action("playlist_error", {"error": str(e), "playlist_id": playlist_id})
             return []
 
-    # ---- DeepSeek: устойчивый вызов с ретраями ----
+    # Устойчивый вызов DeepSeek
     def _call_deepseek_api(self, prompt: str, *, max_tokens: int):
         if not DEEPSEEK_ENABLED:
             return {"error": "deepseek_disabled"}
-
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
-
         headers = {"Authorization": f"Bearer {self.deepseek_api_key}", "Content-Type": "application/json"}
         data = {
             "model": self.deepseek_config.get("model", "deepseek-chat"),
@@ -142,37 +141,22 @@ class EnhancedAITutor:
             "temperature": float(self.deepseek_config.get("temperature", 0.5)),
             "max_tokens": int(max_tokens),
         }
-
-        retry = Retry(
-            total=3,
-            backoff_factor=1.5,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=frozenset(["POST"]),
-        )
+        retry = Retry(total=3, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=frozenset(["POST"]))
         adapter = HTTPAdapter(max_retries=retry)
         sess = requests.Session()
         sess.mount("https://", adapter)
         sess.mount("http://", adapter)
-
         try:
-            resp = sess.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                headers=headers,
-                json=data,
-                timeout=(10, 60),  # connect 10s, read 60s
-            )
+            resp = sess.post("https://api.deepseek.com/v1/chat/completions", headers=headers, json=data, timeout=(10, 60))
             if resp.status_code == 402:
                 return {"error": "402"}
             resp.raise_for_status()
             result = resp.json()
             content = result["choices"][0]["message"]["content"]
-
-            # Попробуем JSON
             try:
                 return json.loads(content)
             except json.JSONDecodeError:
                 return {"content": content}
-
         except requests.exceptions.Timeout:
             return {"error": "timeout"}
         except requests.exceptions.HTTPError as e:
@@ -182,22 +166,22 @@ class EnhancedAITutor:
         finally:
             sess.close()
 
-    # ---- Теоретические вопросы: РОВНО N, без уровней ----
+    # Теория — РОВНО N вопросов
     def generate_theory_questions(self, topic: str, subject: str, grade: str, questions_count: int):
         prompt = f"""
 Сгенерируй РОВНО {questions_count} теоретических вопросов по теме "{topic}" ({grade} класс, предмет "{subject}").
 
-Требования к каждому вопросу:
-- 4 варианта ответа строго в формате: "A) ...", "B) ...", "C) ...", "D) ..."
+Требования:
+- 4 варианта ответа строго: "A) ...", "B) ...", "C) ...", "D) ..."
 - Ровно один правильный вариант среди A/B/C/D
-- Короткое объяснение, формулы в LaTeX: \\( ... \\) или \\[ ... \\]
-- Формулировки короткие и по теме
+- Короткое объяснение с LaTeX при необходимости: \\( ... \\)
+- Все вопросы строго по указанной теме и уровню класса
 
-Верни СТРОГО ВАЛИДНЫЙ JSON без комментариев и многоточий:
+Верни СТРОГО ВАЛИДНЫЙ JSON без комментариев/многоточий:
 {{
   "questions": [
     {{
-      "question": "Текст вопроса с LaTeX при необходимости: \\(...\\)",
+      "question": "Текст вопроса: \\(...\\)",
       "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
       "correct_answer": "A",
       "explanation": "Краткое объяснение: \\(...\\)"
@@ -205,32 +189,28 @@ class EnhancedAITutor:
   ]
 }}
 """
-        # для 10 вопросов этого хватает
         return self._call_deepseek_api(prompt, max_tokens=2000)
 
-    # ---- Практика: easy/medium/hard ----
+    # Практика — easy/medium/hard
     def generate_practice_tasks(self, topic: str, subject: str, grade: str, user_performance: float | None):
         perf = ""
         if user_performance is not None:
             if user_performance < 60:
-                perf = "Сделай акцент на простые задачи с очень понятными пояснениями."
+                perf = "Сделай акцент на простые задачи с понятными пояснениями."
             elif user_performance > 85:
-                perf = "Добавь более сложные, нестандартные задачи."
+                perf = "Добавь более сложные задачи."
         t_easy = APP_CONFIG["tasks_per_difficulty"]["easy"]
         t_med  = APP_CONFIG["tasks_per_difficulty"]["medium"]
         t_hard = APP_CONFIG["tasks_per_difficulty"]["hard"]
-
         prompt = f"""
 Составь практические задачи по теме "{topic}" для {grade}-го класса по предмету "{subject}":
-- {t_easy} лёгких,
-- {t_med} средних,
-- {t_hard} сложных.
+- {t_easy} лёгких, {t_med} средних, {t_hard} сложных.
 
 {perf}
 
-Для каждой задачи верни:
+Формат для каждой задачи:
 - "question": текст условия (с LaTeX при необходимости)
-- "answer": правильный ответ (текст/число; для неравенств формат типа "x >= 2, x < 5")
+- "answer": правильный ответ (текст/число; для неравенств формат "x >= 2, x < 5")
 - "solution": пошаговое объяснение (с LaTeX)
 - "hint": короткая подсказка без LaTeX
 
@@ -241,33 +221,43 @@ class EnhancedAITutor:
   "hard": [ {{ "question":"...", "answer":"...", "solution":"...", "hint":"..." }} ]
 }}
 """
-        # для полного блока практики — больше токенов
         return self._call_deepseek_api(prompt, max_tokens=2200)
 
-    # ---- Короткая подсказка (малый max_tokens) ----
     def get_hint(self, question, user_answer, correct_answer):
         prompt = f"""
 Студент решал задачу: "{question}"
 Правильный ответ: "{correct_answer}"
 Ответ студента: "{user_answer}"
 
-Дай очень короткую подсказку (1-2 предложения), чтобы навести на верный путь, без LaTeX и без полного решения.
-Если формат записан неверно (например, вместо ">=" написано "больше или равно"), обязательно укажи на это.
+Дай очень короткую подсказку (1-2 предложения), без LaTeX, без полного решения.
+Если формат записи ответа неверный (например, вместо ">=" написано "больше или равно"), обязательно укажи на это.
 """
         resp = self._call_deepseek_api(prompt, max_tokens=300)
         if isinstance(resp, dict) and "content" in resp and resp["content"].strip():
             return resp["content"].strip()
         return "Подумай о свойствах выражений и корректном формате записи ответа."
 
+# ================== UI ==================
 
-# ============== UI / ЛОГИКА ПРИЛОЖЕНИЯ ==============
 def main():
     st.markdown('<div class="main-header"><h1>📚 AI Тьютор — персональное обучение</h1></div>', unsafe_allow_html=True)
 
-    tutor = EnhancedAITutor()
-    session = SessionManager()
+    # ---- Пользователь / облако ----
+    st.sidebar.markdown("### 👤 Пользователь")
+    user_id = st.sidebar.text_input("Идентификатор (для облака)", placeholder="email или ник")
+    cloud_ok = bool((os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_ANON_KEY")) and user_id)
+    st.sidebar.markdown(
+        '<span class="badge {}">{}</span>'.format(
+            "badge-green" if cloud_ok else "badge-gray",
+            "Supabase: подключено" if cloud_ok else "Supabase: локальное хранение",
+        ),
+        unsafe_allow_html=True,
+    )
 
-    # ---- Sidebar: выбор курса ----
+    tutor = EnhancedAITutor()
+    session = SessionManager(user_id=user_id if user_id else None)
+
+    # ---- Выбор курса ----
     st.sidebar.header("📖 Выбор курса")
     subjects = list(tutor.playlists.keys())
     subject = st.sidebar.selectbox("Предмет:", subjects, format_func=lambda x: f"{get_subject_emoji(x)} {x}")
@@ -295,16 +285,14 @@ def main():
     if chart:
         st.sidebar.plotly_chart(chart, use_container_width=True)
 
-    # Небольшая диагностика DeepSeek
     with st.sidebar.expander("⚙️ Диагностика LLM"):
         if not DEEPSEEK_ENABLED:
             st.warning("DeepSeek: ключ не задан")
         else:
             if st.button("Проверить доступность"):
-                ping = tutor._call_deepseek_api('{"ping": "ok"}', max_tokens=64)
+                ping = tutor._call_deepseek_api('{"ping":"ok"}', max_tokens=64)
                 st.write(ping)
 
-    # ---- Роутинг ----
     stage = session.get_stage()
     if stage == "video":
         display_video_content(tutor, session)
@@ -315,8 +303,7 @@ def main():
     else:
         st.info("👆 Выберите предмет и класс в боковой панели, затем нажмите «Начать обучение».")
 
-
-def display_video_content(tutor: EnhancedAITutor, session: SessionManager):
+def display_video_content(tutor, session):
     videos = session.get_videos()
     if not videos:
         st.warning("Видео из плейлиста не загружены.")
@@ -344,35 +331,24 @@ def display_video_content(tutor: EnhancedAITutor, session: SessionManager):
             if st.button("Пересмотреть"):
                 log_user_action("rewatch_video", {"video": current["title"]})
                 st.rerun()
-
         if session.get_current_video_index() > 0 and st.button("← Предыдущий урок"):
             session.prev_video()
-            log_user_action("previous_video", {"video_index": session.get_current_video_index()})
             st.rerun()
         if session.get_current_video_index() < len(videos) - 1 and st.button("Следующий урок →"):
             session.next_video()
-            log_user_action("next_video", {"video_index": session.get_current_video_index()})
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-
-def show_theory_test(tutor: EnhancedAITutor, session: SessionManager):
+def show_theory_test(tutor, session):
     current_video = session.get_videos()[session.get_current_video_index()]
     st.subheader("📝 Тест по теории")
     st.caption(f"Тема: {current_video['title']}")
 
-    # Генерация 1 раз
     if "theory_questions" not in st.session_state:
         with st.spinner("Генерация вопросов..."):
             qn = int(APP_CONFIG.get("theory_questions_count", 5))
-            data = tutor.generate_theory_questions(
-                topic=current_video["title"],
-                subject=session.get_subject(),
-                grade=session.get_grade(),
-                questions_count=qn,
-            )
+            data = tutor.generate_theory_questions(current_video["title"], session.get_subject(), session.get_grade(), qn)
 
-        # Ошибки DeepSeek
         if isinstance(data, dict) and data.get("error"):
             err = data["error"]
             if err == "timeout":
@@ -382,8 +358,6 @@ def show_theory_test(tutor: EnhancedAITutor, session: SessionManager):
             else:
                 st.error(f"Не удалось сгенерировать вопросы: {err}")
             if st.button("Попробовать снова"):
-                if "theory_questions" in st.session_state:
-                    del st.session_state["theory_questions"]
                 st.rerun()
             return
 
@@ -394,7 +368,6 @@ def show_theory_test(tutor: EnhancedAITutor, session: SessionManager):
                 data = {"questions": []}
 
         questions = (data or {}).get("questions", [])
-        # Ровно N
         qn = int(APP_CONFIG.get("theory_questions_count", 5))
         questions = questions[:qn]
         if len(questions) < qn:
@@ -405,7 +378,6 @@ def show_theory_test(tutor: EnhancedAITutor, session: SessionManager):
                 st.rerun()
             return
 
-        # Нормализация опций (на случай, если пришли без «A) » и т.п.)
         for q in questions:
             opts = q.get("options", [])
             if len(opts) == 4:
@@ -415,7 +387,6 @@ def show_theory_test(tutor: EnhancedAITutor, session: SessionManager):
         st.session_state.theory_questions = questions
         st.session_state.theory_answers = {}
 
-    # Рендер
     qs = st.session_state.theory_questions
     for i, q in enumerate(qs):
         st.markdown('<div class="task-card">', unsafe_allow_html=True)
@@ -439,8 +410,7 @@ def show_theory_test(tutor: EnhancedAITutor, session: SessionManager):
             else:
                 st.error("Пожалуйста, ответьте на все вопросы.")
 
-
-def show_theory_results(tutor: EnhancedAITutor, session: SessionManager):
+def show_theory_results(tutor, session):
     current_video = session.get_videos()[session.get_current_video_index()]
     topic_key = f"{session.get_subject()}_{session.get_grade()}_{current_video['title']}"
     st.markdown('<div class="progress-card">', unsafe_allow_html=True)
@@ -452,7 +422,6 @@ def show_theory_results(tutor: EnhancedAITutor, session: SessionManager):
         user = st.session_state.theory_answers.get(i, "")
         corr = (q.get("correct_answer") or "").strip()[:1].upper()
         ok = compare_answers(user, corr)
-
         if ok:
             correct += 1
             st.markdown(f'<div class="answer correct">Вопрос {i+1}: Правильно!</div>', unsafe_allow_html=True)
@@ -464,11 +433,8 @@ def show_theory_results(tutor: EnhancedAITutor, session: SessionManager):
 
     score = calculate_score(correct, total)
     st.metric("Ваш результат", f"{correct}/{total} ({score:.0f}%)")
-
-    # Сохраняем
     session.save_theory_score(topic_key, score)
 
-    # Порог
     pass_thr = APP_CONFIG.get("theory_pass_threshold", 60)
     if score < pass_thr:
         st.warning(f"Проходной порог {pass_thr}%. Рекомендуем пересмотреть видео и пройти тест снова.")
@@ -482,39 +448,27 @@ def show_theory_results(tutor: EnhancedAITutor, session: SessionManager):
             session.set_stage("video")
             st.rerun()
     with c2:
-        # Кнопка доступна всегда, но можно заблокировать если хочешь строго после порога:
         if st.button("Начать практику", type="primary"):
             session.clear_theory_data()
             session.set_stage("practice")
             st.rerun()
-
     st.markdown("</div>", unsafe_allow_html=True)
 
-
-def show_practice_stage(tutor: EnhancedAITutor, session: SessionManager):
+def show_practice_stage(tutor, session):
     current_video = session.get_videos()[session.get_current_video_index()]
     st.subheader("💪 Практические задания")
     st.caption(f"Тема: {current_video['title']}")
-
     st.markdown("""
 <div class="task-card">
-  📝 <b>Совет:</b> Для сложных задач записывайте решение на черновике.<br>
-  Для неравенств используйте символы: <code>&gt;=, &lt;=, &gt;, &lt;</code> и интервалы вида <code>[2, inf)</code>.<br>
+  📝 <b>Совет:</b> Для неравенств используйте символы: <code>&gt;=, &lt;=, &gt;, &lt;</code> и интервалы вида <code>[2, inf)</code>.
   Для нескольких условий — <code>and</code> или запятые.
 </div>
 """, unsafe_allow_html=True)
 
-    # Генерация 1 раз
     if "practice_tasks" not in st.session_state:
         with st.spinner("Генерация заданий..."):
             theory_score = session.get_theory_score(current_video["title"])
-            data = tutor.generate_practice_tasks(
-                topic=current_video["title"],
-                subject=session.get_subject(),
-                grade=session.get_grade(),
-                user_performance=theory_score
-            )
-        # Ошибки
+            data = tutor.generate_practice_tasks(current_video["title"], session.get_subject(), session.get_grade(), theory_score)
         if isinstance(data, dict) and data.get("error"):
             err = data["error"]
             if err == "timeout":
@@ -528,42 +482,36 @@ def show_practice_stage(tutor: EnhancedAITutor, session: SessionManager):
                     del st.session_state["practice_tasks"]
                 st.rerun()
             return
-
         if isinstance(data, dict) and "content" in data:
             try:
                 data = json.loads(data["content"])
             except Exception:
                 data = {"easy": [], "medium": [], "hard": []}
-
         st.session_state.practice_tasks = {
-            "easy":   data.get("easy", []),
+            "easy": data.get("easy", []),
             "medium": data.get("medium", []),
-            "hard":   data.get("hard", []),
+            "hard": data.get("hard", []),
         }
         st.session_state.task_attempts = {}
         st.session_state.completed_tasks = []
         st.session_state.current_task_type = "easy"
         st.session_state.current_task_index = 0
 
-    # Если задач нет
     if not any(len(st.session_state.practice_tasks.get(t, [])) for t in ["easy", "medium", "hard"]):
         st.error("Нет заданий. Попробуйте снова.")
         return
 
     show_current_task(tutor, session)
 
-
-def show_current_task(tutor: EnhancedAITutor, session: SessionManager):
+def show_current_task(tutor, session):
     task_types = ["easy", "medium", "hard"]
     cur_type = st.session_state.current_task_type
     cur_idx = st.session_state.current_task_index
     tasks = st.session_state.practice_tasks.get(cur_type, [])
-
-    # Переходы
     if cur_idx >= len(tasks):
-        type_i = task_types.index(cur_type)
-        if type_i < len(task_types) - 1:
-            st.session_state.current_task_type = task_types[type_i + 1]
+        i = task_types.index(cur_type)
+        if i < len(task_types) - 1:
+            st.session_state.current_task_type = task_types[i + 1]
             st.session_state.current_task_index = 0
             st.rerun()
         else:
@@ -573,15 +521,15 @@ def show_current_task(tutor: EnhancedAITutor, session: SessionManager):
     task = tasks[cur_idx]
     task_key = f"{cur_type}_{cur_idx}"
 
-    total_tasks = sum(len(st.session_state.practice_tasks.get(t, [])) for t in task_types)
-    completed = len(st.session_state.completed_tasks)
+    total = sum(len(st.session_state.practice_tasks.get(t, [])) for t in task_types)
+    done = len(st.session_state.completed_tasks)
 
     c1, c2 = st.columns([3, 1])
     with c2:
         st.markdown('<div class="progress-card">', unsafe_allow_html=True)
         st.markdown("### 📊 Прогресс")
-        st.progress(completed / total_tasks if total_tasks else 0)
-        st.metric("Выполнено", f"{completed}/{total_tasks}")
+        st.progress(done / total if total else 0)
+        st.metric("Выполнено", f"{done}/{total}")
         st.markdown(f'<span class="difficulty-badge {cur_type}">{UI_CONFIG["task_type_names"][cur_type]}</span>', unsafe_allow_html=True)
         st.markdown(f"**Задание:** {cur_idx + 1} из {len(tasks)}")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -590,7 +538,6 @@ def show_current_task(tutor: EnhancedAITutor, session: SessionManager):
         st.markdown(f'<div class="task-card"><span class="difficulty-badge {cur_type}">{UI_CONFIG["task_type_names"][cur_type]}</span>', unsafe_allow_html=True)
         st.markdown(f"### Задание {cur_idx + 1}")
         st.markdown(task.get("question", ""), unsafe_allow_html=True)
-
         ans = st.text_input("Ваш ответ:", key=f"ans_{task_key}")
         attempts = st.session_state.task_attempts.get(task_key, 0)
         max_attempts = APP_CONFIG["max_attempts_per_task"]
@@ -608,39 +555,31 @@ def show_current_task(tutor: EnhancedAITutor, session: SessionManager):
                     log_user_action("skip_task", {"task_key": task_key})
                     move_to_next_task()
         else:
-            st.error(f"Попытки исчерпаны ({max_attempts}).")
             st.markdown(f"**Правильный ответ:** {task.get('answer','')}", unsafe_allow_html=True)
             st.markdown(f"**Решение:** {task.get('solution','')}", unsafe_allow_html=True)
             if st.button("Следующее задание"):
                 move_to_next_task()
 
-        # Подсказки, если уже есть
         if task_key in st.session_state and "hints" in st.session_state[task_key]:
             st.markdown("### 💡 Подсказки")
             for h in st.session_state[task_key]["hints"]:
                 st.info(h)
-
         st.markdown("</div>", unsafe_allow_html=True)
 
-
-def check_answer(tutor: EnhancedAITutor, session: SessionManager, task: dict, user_answer: str, task_key: str):
+def check_answer(tutor, session, task, user_answer, task_key):
     st.session_state.task_attempts[task_key] = st.session_state.task_attempts.get(task_key, 0) + 1
     attempts = st.session_state.task_attempts[task_key]
     max_attempts = APP_CONFIG["max_attempts_per_task"]
-
     is_ok = compare_answers((user_answer or "").strip().lower(), (task.get("answer") or "").strip().lower())
-
     if is_ok:
         st.markdown('<div class="answer correct">Правильно! Отличная работа.</div>', unsafe_allow_html=True)
         if task_key not in st.session_state.completed_tasks:
             st.session_state.completed_tasks.append(task_key)
-        log_user_action("correct_answer", {"task_key": task_key, "attempts": attempts})
         if st.button("Следующее задание"):
             move_to_next_task()
     else:
         if attempts < max_attempts:
             st.markdown('<div class="answer incorrect">Неправильно.</div>', unsafe_allow_html=True)
-            # Подсказка (DeepSeek — малый max_tokens)
             hint = "Подумай про свойства выражений и корректный формат ответа."
             if DEEPSEEK_ENABLED:
                 try:
@@ -651,7 +590,6 @@ def check_answer(tutor: EnhancedAITutor, session: SessionManager, task: dict, us
                 st.session_state[task_key] = {"hints": []}
             st.session_state[task_key]["hints"].append(hint)
             st.info(hint)
-            log_user_action("incorrect_answer", {"task_key": task_key, "attempts": attempts})
         else:
             st.markdown('<div class="answer incorrect">Все попытки исчерпаны.</div>', unsafe_allow_html=True)
             st.markdown(f"**Правильный ответ:** {task.get('answer','')}", unsafe_allow_html=True)
@@ -659,29 +597,24 @@ def check_answer(tutor: EnhancedAITutor, session: SessionManager, task: dict, us
             if st.button("Следующее задание"):
                 move_to_next_task()
 
-
 def move_to_next_task():
     st.session_state.current_task_index += 1
     st.rerun()
 
-
-def show_practice_completion(tutor: EnhancedAITutor, session: SessionManager):
+def show_practice_completion(tutor, session):
     videos = session.get_videos()
     if not videos:
         st.info("Практика завершена.")
         return
     current = videos[session.get_current_video_index()]
     topic_key = f"{session.get_subject()}_{session.get_grade()}_{current['title']}"
-
     st.markdown('<div class="progress-card">', unsafe_allow_html=True)
     st.subheader("Практика завершена!")
     total = sum(len(st.session_state.practice_tasks.get(t, [])) for t in ["easy", "medium", "hard"])
     done = len(st.session_state.completed_tasks)
     score = calculate_score(done, total) if total else 0
     st.success(f"Выполнено {done} из {total} заданий ({score:.0f}%).")
-
     session.save_practice_score(topic_key, done, total)
-
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Изучить новую тему"):
@@ -696,10 +629,8 @@ def show_practice_completion(tutor: EnhancedAITutor, session: SessionManager):
             session.set_stage("selection")
             session.clear_practice_data()
             st.rerun()
-
     st.markdown(generate_progress_report(session.get_progress(), topic_key), unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
-
 
 if __name__ == "__main__":
     main()
