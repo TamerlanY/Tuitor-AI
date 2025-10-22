@@ -1,19 +1,13 @@
 # config.py
-import os
 from dotenv import load_dotenv
+import os
 
-# Загружаем .env локально (на Streamlit Cloud секреты задаются в Secrets/Env)
 load_dotenv()
 
-# ====== API ключи (берём только из окружения/.env; в app.py есть доп. резолв из st.secrets) ======
+# Ключи читаем из окружения / .env (а в app.py — ещё и из st.secrets)
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
-# ====== (опционально) Supabase для облачного прогресса ======
-SUPABASE_URL = os.getenv("SUPABASE_URL")            # пример: https://xxxx.supabase.co
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")  # anon ключ
-
-# ====== Плейлисты ======
 PLAYLISTS = {
     "Алгебра": {
         "7":  "PLCRqj4jDCIYmUtgQCGy3l5GGYbiDBR3p-",
@@ -51,39 +45,38 @@ PLAYLISTS = {
     },
 }
 
-# ====== Конфиг приложения ======
 APP_CONFIG = {
     "youtube_max_results": 50,
 
-    # Теория: сколько вопросов требуем РОВНО
+    # Теория: просим 10, но если модель даст меньше — допускаем минимум (например, 6)
     "theory_questions_count": 10,
+    "theory_min_questions": 6,
 
-    # Практика: сколько задач по уровням
     "tasks_per_difficulty": {"easy": 3, "medium": 3, "hard": 2},
-
-    # Сколько попыток на задачу практики
     "max_attempts_per_task": 3,
-
-    # Порог прохождения теории
     "theory_pass_threshold": 60,
-
-    # Локальный файл прогресса (если нет Supabase)
     "progress_file": "progress.json",
 }
 
-# ====== DeepSeek ======
 DEEPSEEK_CONFIG = {
     "model": "deepseek-chat",
-    "temperature": 0.5,
-    # Чуть больше токенов, чтобы стабильно умещались 10 теор. вопросов
-    "max_tokens": 2200,
-    # Повторные попытки при таймаутах/сетевых ошибках
-    "retry_attempts": 2,
-    # Таймаут на запрос к LLM
-    "timeout": 18,
+    "temperature": 0.7,
+
+    # Разделяем лимиты для теории и практики
+    "max_tokens": 2000,              # дефолт
+    "max_tokens_theory": 3400,       # 10 вопросов с объяснениями
+    "max_tokens_practice": 2800,     # набор практик
+
+    # Таймауты
+    "timeout": 30,
+    "timeout_theory": 45,
+    "timeout_practice": 40,
+
+    # Повторы
+    "retry_attempts": 3,
+    "theory_topup_retries": 2,       # сколько раз «доделывать» недостающие вопросы
 }
 
-# ====== UI ======
 UI_CONFIG = {
     "page_title": "AI Тьютор",
     "page_icon": "📚",
@@ -95,3 +88,7 @@ UI_CONFIG = {
         "hard": "Сложный уровень",
     },
 }
+
+# (опционально) Supabase — если подключал в utils.SessionManager
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
