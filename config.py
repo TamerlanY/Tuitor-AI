@@ -2,13 +2,20 @@
 from dotenv import load_dotenv
 import os
 
-# Для локалки: подтянуть .env (на проде можно просто env переменные)
+# Подхватываем .env локально (на Streamlit Cloud можно не использовать)
 load_dotenv()
 
-# API-ключи здесь не валидируем, т.к. app.py сам читает их и стопает при отсутствии
-# YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-# DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+# === КЛЮЧИ ДЛЯ YOUTUBE / DEEPSEEK ===
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
+# === S U P A B A S E (необязательно; если задать — прогресс уйдёт в облако) ===
+# Вставь сюда или в Streamlit Secrets:
+# SUPABASE_URL, SUPABASE_ANON_KEY
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+
+# Плейлисты
 PLAYLISTS = {
     "Алгебра": {
         "7":  "PLCRqj4jDCIYmUtgQCGy3l5GGYbiDBR3p-",
@@ -29,7 +36,7 @@ PLAYLISTS = {
         "8":  "PLdjp7wVqN3Wssi0MhFBZTuiz6Ev5YHVBa",
         "9":  "PLdjp7wVqN3Wv_OjT7TdWbY91v0rk4VA53",
         "10": "PLdjp7wVqN3Wu8hFD-nzI6vQe3tqLXzIA-",
-        "11": "PLdjp7wVqN3WtM6h-DpIRXBe5iYdySPzF9",
+        "11": "PLdjp7wVqN3WtM6h-DpIRXBe5iYdySPзF9",
     },
     "Химия": {
         "7":  "PLoe4L7cYJo_WFiJs6BqpJ6zuYMjnB_vLe",
@@ -52,7 +59,7 @@ APP_CONFIG = {
     "tasks_per_difficulty": {"easy": 3, "medium": 3, "hard": 2},
     "max_attempts_per_task": 3,
     "theory_pass_threshold": 60,
-    "progress_file": "progress.json",
+    "progress_file": "progress.json",  # fallback локально
 }
 
 DEEPSEEK_CONFIG = {
