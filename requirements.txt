@@ -3,4 +3,5 @@ requests
 python-dotenv
 plotly
 pandas
+supabase
 streamlit-authenticator
