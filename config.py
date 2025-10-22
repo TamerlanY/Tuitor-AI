@@ -55,7 +55,7 @@ PLAYLISTS = {
 
 APP_CONFIG = {
     "youtube_max_results": 50,
-    "theory_questions_count": 5,
+    "theory_questions_count": 10,
     "tasks_per_difficulty": {"easy": 3, "medium": 3, "hard": 2},
     "max_attempts_per_task": 3,
     "theory_pass_threshold": 60,
@@ -81,4 +81,5 @@ UI_CONFIG = {
         "hard": "Сложный уровень",
     },
 }
+
 
