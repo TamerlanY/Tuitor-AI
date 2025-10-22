@@ -69,9 +69,9 @@ APP_CONFIG = {
 DEEPSEEK_CONFIG = {
     "model": "deepseek-chat",
     "temperature": 0.5,
-    "max_tokens": 1200,    # базовый (перекрывается по месту вызова)
+    "max_tokens": 1800,    # базовый (перекрывается по месту вызова)
     "retry_attempts": 3,
-    "timeout": 60,
+    "timeout": 25,
 }
 
 # UI
@@ -86,3 +86,4 @@ UI_CONFIG = {
         "hard": "Сложный уровень",
     },
 }
+
