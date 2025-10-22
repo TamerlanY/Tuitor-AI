@@ -1,3 +1,4 @@
+# utils.py
 import os
 import json
 import re
@@ -9,8 +10,14 @@ import streamlit as st
 
 from config import APP_CONFIG, UI_CONFIG
 
+
+# ================== Сравнение ответов ==================
+
 def compare_answers(user_answer, correct_answer):
-    """Сравнивает ответ пользователя с правильным, учитывая числа, множества, неравенства и текстовые ошибки."""
+    """
+    Сравнивает ответ пользователя с правильным, учитывая числа, множества, неравенства и текстовые ошибки.
+    Возвращает True/False.
+    """
     user_answer = str(user_answer or "").strip().lower()
     correct_answer = str(correct_answer or "").strip().lower()
 
@@ -33,7 +40,7 @@ def compare_answers(user_answer, correct_answer):
     user_answer_norm = normalize_answer(user_answer)
     correct_answer_norm = normalize_answer(correct_answer)
 
-    # неравенства
+    # неравенства: "x>=2, x<5" и т.п.
     if any(op in user_answer_norm for op in [">=", "<=", ">", "<"]):
         user_parts = re.split(r"(?:and|or|,|;)", user_answer_norm)
         correct_parts = re.split(r"(?:and|or|,|;)", correct_answer_norm)
@@ -41,17 +48,17 @@ def compare_answers(user_answer, correct_answer):
         correct_parts = sorted([p for p in correct_parts if p])
         return user_parts == correct_parts
 
-    # интервалы
-    if any(c in user_answer for c in ["[", "]", "(", ")"]):
+    # интервалы: [2, inf)
+    if any(c in (user_answer or "") for c in ["[", "]", "(", ")"]):
         return user_answer.replace(" ", "") == correct_answer.replace(" ", "")
 
-    # множества через запятую
+    # множества через запятую (порядок не важен)
     if "," in user_answer or "," in correct_answer:
         user_set = set(user_answer_norm.split(","))
         correct_set = set(correct_answer_norm.split(","))
         return user_set == correct_set
 
-    # дроби как 1/2
+    # дроби вида 1/2
     if "/" in user_answer:
         try:
             user_val = eval(user_answer)
@@ -60,7 +67,7 @@ def compare_answers(user_answer, correct_answer):
         except Exception:
             pass
 
-    # простой множественный выбор
+    # множественный выбор
     if correct_answer_norm in ["a", "b", "c", "d"]:
         return user_answer_norm == correct_answer_norm or user_answer_norm == correct_answer_norm[0]
 
@@ -77,7 +84,10 @@ def generate_progress_report(progress_data, topic_key):
     if "theory_score" in topic_scores:
         report += f"<li>Теория: {topic_scores['theory_score']:.0f}%</li>"
     if "practice_completed" in topic_scores:
-        prc = calculate_score(topic_scores.get("practice_completed", 0), topic_scores.get("practice_total", 1))
+        prc = calculate_score(
+            topic_scores.get("practice_completed", 0),
+            topic_scores.get("practice_total", 1),
+        )
         report += f"<li>Практика: {topic_scores['practice_completed']}/{topic_scores['practice_total']} ({prc:.0f}%)</li>"
     report += f"<li>Дата: {topic_scores.get('date', 'N/A')}</li>"
     report += "</ul>"
@@ -95,14 +105,14 @@ def get_subject_emoji(subject):
     return emojis.get(subject, "📚")
 
 
-# ---------- САНИТАЙЗИНГ ВОПРОСОВ ТЕОРИИ ----------
+# =============== Санитайзинг вопросов теории ===============
 
 def _normalize_options(opts):
-    """Приводим к 4 опциям A/B/C/D и гарантируем формат 'A) ...'."""
+    """
+    Приводим к 4 опциям A/B/C/D и гарантируем формат 'A) ...'.
+    """
     opts = list(opts or [])
-    # срезаем всё что длиннее 4
     opts = opts[:4]
-    # добиваем пустыми, если меньше 4
     while len(opts) < 4:
         opts.append("—")
 
@@ -110,31 +120,34 @@ def _normalize_options(opts):
     fixed = []
     for i, raw in enumerate(opts[:4]):
         text = str(raw or "").strip()
-        # Уберём случайные префиксы и проставим "A) ...":
+        # Убираем возможный префикс "A) ", "B: " и т.п.
         text = re.sub(r"^[A-Da-d][\)\.\:]\s*", "", text)
         fixed.append(f"{letters[i]}) {text if text else '—'}")
     return fixed
 
 
 def sanitize_theory_questions(items):
-    """Проверяем и чистим вопросы теории. Возвращаем список годных вопросов."""
+    """
+    Проверяет и чистит вопросы теории. Возвращает список пригодных вопросов.
+    Каждый вопрос имеет поля: question, options[4], correct_answer in {A,B,C,D}, explanation.
+    """
     safe = []
     for q in items or []:
         question = str(q.get("question", "")).strip()
         options = _normalize_options(q.get("options"))
         correct = str(q.get("correct_answer", "")).strip().upper()
+
         if correct not in ["A", "B", "C", "D"]:
-            # если модель прислала '1','2','3','4' — конвертим
+            # если прислали 1..4 — конвертим
             if correct in ["1", "2", "3", "4"]:
                 mapping = {"1": "A", "2": "B", "3": "C", "4": "D"}
                 correct = mapping[correct]
             else:
-                # попытка угадать по тексту правильного варианта
-                # если модель прислала полный текст, попробуем сопоставить
-                correct = "A"  # дефолт, чтобы не падать
+                # дефолт — A (чтобы не падать)
+                correct = "A"
 
         explanation = str(q.get("explanation", "")).strip()
-        if not question or not options or len(options) != 4:
+        if not question or len(options) != 4:
             continue
 
         safe.append(
@@ -148,13 +161,15 @@ def sanitize_theory_questions(items):
     return safe
 
 
-# -------------- Сессия / прогресс --------------
+# ================== Session Manager / Прогресс ==================
 
 class SessionManager:
-    """Управление состоянием сессии и прогрессом."""
+    """Управление состоянием сессии и прогрессом (локальный JSON)."""
+
     def __init__(self, user_id=None):
         self.user_id = user_id
         self.progress_file = APP_CONFIG["progress_file"]
+
         if "progress" not in st.session_state:
             st.session_state.progress = self.load_progress()
         if "current_stage" not in st.session_state:
@@ -168,6 +183,7 @@ class SessionManager:
         if "selected_grade" not in st.session_state:
             st.session_state.selected_grade = None
 
+    # ---------- прогресс ----------
     def load_progress(self):
         if os.path.exists(self.progress_file):
             try:
@@ -194,6 +210,7 @@ class SessionManager:
     def get_grade(self):
         return st.session_state.selected_grade
 
+    # ---------- видео ----------
     def start_course(self, videos):
         st.session_state.videos = videos
         completed_titles = [
@@ -225,12 +242,14 @@ class SessionManager:
             return True
         return False
 
+    # ---------- stage ----------
     def set_stage(self, stage):
         st.session_state.current_stage = stage
 
     def get_stage(self):
         return st.session_state.current_stage
 
+    # ---------- оценки ----------
     def get_progress(self):
         return st.session_state.progress
 
@@ -272,10 +291,18 @@ class SessionManager:
                 del st.session_state[key]
 
     def clear_practice_data(self):
-        for key in ["practice_tasks", "task_attempts", "completed_tasks", "current_task_type", "current_task_index"]:
+        for key in [
+            "practice_tasks",
+            "task_attempts",
+            "completed_tasks",
+            "current_task_type",
+            "current_task_index",
+        ]:
             if key in st.session_state:
                 del st.session_state[key]
 
+
+# ================== График прогресса ==================
 
 def create_progress_chart_data(progress_data):
     scores = progress_data.get("scores", {})
@@ -298,10 +325,19 @@ def create_progress_chart_data(progress_data):
             }
         )
     df = pd.DataFrame(data)
-    fig = px.bar(df, x="Тема", y=["Теория (%)", "Практика (%)"], barmode="group", title="Прогресс по темам", height=300)
+    fig = px.bar(
+        df,
+        x="Тема",
+        y=["Теория (%)", "Практика (%)"],
+        barmode="group",
+        title="Прогресс по темам",
+        height=300,
+    )
     fig.update_layout(yaxis_title="Результат (%)", legend_title="Тип", margin=dict(t=50, b=50))
     return fig
 
+
+# ================== Логирование ==================
 
 def log_user_action(action, details):
     log_entry = {"timestamp": datetime.now().isoformat(), "action": action, "details": details}
