@@ -1,0 +1,6 @@
+streamlit==1.39.0
+requests
+python-dotenv
+plotly
+pandas
+streamlit-authenticator
