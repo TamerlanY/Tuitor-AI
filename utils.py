@@ -1,40 +1,33 @@
 import os
 import json
-import re
-from datetime import datetime
-from fractions import Fraction
-
-import streamlit as st
 import pandas as pd
 import plotly.express as px
+from datetime import datetime
+from config import APP_CONFIG, UI_CONFIG, SUPABASE_URL, SUPABASE_ANON_KEY
+import re
+import streamlit as st
 
-from config import APP_CONFIG, UI_CONFIG
+# --- OPTIONAL: Supabase client ---
+SUPABASE = None
+try:
+    # сначала пробуем secrets (Streamlit Cloud), потом env
+    sb_url = st.secrets.get("SUPABASE_URL", None) if hasattr(st, "secrets") else None
+    sb_key = st.secrets.get("SUPABASE_ANON_KEY", None) if hasattr(st, "secrets") else None
+    sb_url = sb_url or SUPABASE_URL
+    sb_key = sb_key or SUPABASE_ANON_KEY
+    if sb_url and sb_key:
+        from supabase import create_client
+        SUPABASE = create_client(sb_url, sb_key)
+except Exception:
+    SUPABASE = None
 
-
-def _safe_to_float(s: str):
-    """Пробует преобразовать строку к числу:
-    - сначала как Fraction('1/2') -> 0.5,
-    - потом как float('0.5'),
-    иначе возвращает None.
-    """
-    try:
-        return float(Fraction(s))
-    except Exception:
-        pass
-    try:
-        return float(s)
-    except Exception:
-        return None
-
+SUPABASE_TABLE = "user_progress"  # создадим такую таблицу
 
 def compare_answers(user_answer, correct_answer):
-    """Сравнивает ответ пользователя с правильным.
-    Поддержка: A/B/C/D, числа, дроби, множества, интервалы, неравенства.
-    """
+    """Гибкое сравнение ответов (текст, интервалы, неравенства, множества, дроби)."""
     user_answer = str(user_answer or "").strip().lower()
     correct_answer = str(correct_answer or "").strip().lower()
 
-    # Нормализация текстовых операторов на символы
     def replace_textual_operators(text):
         text = text.replace("больше или равно", ">=")
         text = text.replace("меньше или равно", "<=")
@@ -45,93 +38,67 @@ def compare_answers(user_answer, correct_answer):
     user_answer = replace_textual_operators(user_answer)
     correct_answer = replace_textual_operators(correct_answer)
 
-    # Быстрый кейс для множественного выбора
-    if len(user_answer) == 1 and user_answer in "abcd":
-        if len(correct_answer) == 1 and correct_answer in "abcd":
-            return user_answer == correct_answer
-        # иногда correct может быть "A"
-        if correct_answer and correct_answer[0] in "abcd":
-            return user_answer == correct_answer[0]
+    def normalize_answer(answer):
+        answer = re.sub(r'\s+', '', answer)
+        answer = answer.replace('infinity', 'inf')
+        answer = re.sub(r'[()]+', '', answer)
+        return answer
 
-    # Единая нормализация
-    def norm(s: str) -> str:
-        s = s.replace("infinity", "inf")
-        s = s.replace("–", "-").replace("—", "-")
-        s = re.sub(r"\s+", "", s)
-        return s
+    user_answer = normalize_answer(user_answer)
+    correct_answer = normalize_answer(correct_answer)
 
-    u = norm(user_answer)
-    c = norm(correct_answer)
-
-    # Неравенства: разделяем по and/or/','/';'
-    if any(op in u for op in ['>=', '<=', '>', '<']):
-        user_parts = re.split(r'(?:and|or|,|;)', u)
-        correct_parts = re.split(r'(?:and|or|,|;)', c)
-        user_parts = sorted([p for p in map(norm, user_parts) if p])
-        correct_parts = sorted([p for p in map(norm, correct_parts) if p])
+    if any(op in user_answer for op in ['>=', '<=', '>', '<']):
+        user_parts = re.split(r'(?:and|or|,|;)', user_answer)
+        correct_parts = re.split(r'(?:and|or|,|;)', correct_answer)
+        user_parts = sorted([normalize_answer(p) for p in user_parts if p])
+        correct_parts = sorted([normalize_answer(p) for p in correct_parts if p])
         return user_parts == correct_parts
 
-    # Интервалы вида [a,b) / (a,inf)
-    if any(ch in u for ch in "[]()") or any(ch in c for ch in "[]()"):
-        return u == c
+    if any(c in user_answer for c in ['[', ']', '(', ')']):
+        user_answer = user_answer.replace(' ', '')
+        correct_answer = correct_answer.replace(' ', '')
+        return user_answer == correct_answer
 
-    # Множества значений "2,-2,0"
-    if ',' in u or ',' in c:
-        u_set = set([x for x in u.split(',') if x != ""])
-        c_set = set([x for x in c.split(',') if x != ""])
-        # Пытаемся численно сравнить
-        def to_num_set(ss):
-            arr = []
-            for x in ss:
-                val = _safe_to_float(x)
-                arr.append(val if val is not None else x)
-            return set(arr)
-        return to_num_set(u_set) == to_num_set(c_set)
+    if ',' in user_answer or ',' in correct_answer:
+        user_set = set([s for s in user_answer.split(',') if s])
+        correct_set = set([s for s in correct_answer.split(',') if s])
+        return user_set == correct_set
 
-    # Дроби и числа
-    u_val = _safe_to_float(u)
-    c_val = _safe_to_float(c)
-    if u_val is not None and c_val is not None:
-        return abs(u_val - c_val) < 1e-9
+    if '/' in user_answer:
+        try:
+            user_val = eval(user_answer)
+            correct_val = eval(correct_answer)
+            return abs(user_val - correct_val) < 1e-6
+        except Exception:
+            pass
 
-    # Фоллбек — просто строковое сравнение
-    return u == c
-
+    return user_answer == correct_answer or (correct_answer and user_answer == correct_answer[0])
 
 def calculate_score(correct, total):
     return (correct / total * 100) if total > 0 else 0
 
-
 def generate_progress_report(progress_data, topic_key):
     report = "<h3>📈 Отчет о прогрессе</h3><ul>"
     topic_scores = progress_data.get("scores", {}).get(topic_key, {})
-
     if "theory_score" in topic_scores:
         report += f"<li>Теория: {topic_scores['theory_score']:.0f}%</li>"
     if "practice_completed" in topic_scores:
-        done = topic_scores['practice_completed']
-        total = topic_scores.get('practice_total', 0)
-        report += f"<li>Практика: {done}/{total} ({calculate_score(done, total):.0f}%)</li>"
+        pc = topic_scores['practice_completed']
+        pt = topic_scores.get('practice_total', 1)
+        report += f"<li>Практика: {pc}/{pt} ({calculate_score(pc, pt):.0f}%)</li>"
     report += f"<li>Дата: {topic_scores.get('date', 'N/A')}</li>"
     report += "</ul>"
     return report
 
-
 def get_subject_emoji(subject):
-    emojis = {
-        "Алгебра": "🔢",
-        "Геометрия": "📐",
-        "Физика": "⚛️",
-        "Химия": "🧪",
-        "Английский язык": "🇬🇧",
-    }
+    emojis = {"Алгебра": "🔢", "Геометрия": "📐", "Физика": "⚛️", "Химия": "🧪", "Английский язык": "🇬🇧"}
     return emojis.get(subject, "📚")
 
-
 class SessionManager:
-    """Управление состоянием сессии и прогрессом."""
-    def __init__(self):
+    """Управление прогрессом: Supabase (если есть user_id и ключи), иначе локальный файл."""
+    def __init__(self, user_id=None):
         self.progress_file = APP_CONFIG["progress_file"]
+        self.user_id = user_id
         if 'progress' not in st.session_state:
             st.session_state.progress = self.load_progress()
         if 'current_stage' not in st.session_state:
@@ -145,12 +112,23 @@ class SessionManager:
         if 'selected_grade' not in st.session_state:
             st.session_state.selected_grade = None
 
-    # ---- topic_key helpers ----
-    def topic_key_for_title(self, video_title: str) -> str:
-        return f"{self.get_subject()}_{self.get_grade()}_{video_title}"
+    # ---------- Supabase helpers ----------
+    def _sb_enabled(self):
+        return (self.user_id is not None) and bool(self.user_id.strip()) and (SUPABASE is not None)
 
-    # ---- storage ----
     def load_progress(self):
+        # Supabase → progress.json fallback
+        if self._sb_enabled():
+            try:
+                resp = SUPABASE.table(SUPABASE_TABLE).select("progress").eq("user_id", self.user_id).maybe_single().execute()
+                row = resp.data
+                if row and isinstance(row, dict) and row.get("progress"):
+                    return row["progress"]
+                return {"completed_topics": [], "scores": {}}
+            except Exception as e:
+                st.warning(f"⚠️ Не удалось прочитать Supabase, используем локальный файл. ({e})")
+
+        # локальный файл
         if os.path.exists(self.progress_file):
             try:
                 with open(self.progress_file, "r", encoding="utf-8") as f:
@@ -160,13 +138,27 @@ class SessionManager:
         return {"completed_topics": [], "scores": {}}
 
     def save_progress(self):
+        # Пишем в Supabase, если можно
+        if self._sb_enabled():
+            try:
+                payload = {
+                    "user_id": self.user_id,
+                    "progress": st.session_state.progress,
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                }
+                SUPABASE.table(SUPABASE_TABLE).upsert(payload, on_conflict="user_id").execute()
+                return
+            except Exception as e:
+                st.warning(f"⚠️ Не удалось сохранить Supabase, сохраняем локально. ({e})")
+
+        # Файл — fallback
         try:
             with open(self.progress_file, "w", encoding="utf-8") as f:
                 json.dump(st.session_state.progress, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            st.error(f"❌ Ошибка сохранения прогресса: {str(e)}")
+            st.error(f"❌ Ошибка сохранения прогресса локально: {str(e)}")
 
-    # ---- course/stage ----
+    # ---------- Курс ----------
     def set_course(self, subject, grade):
         st.session_state.selected_subject = subject
         st.session_state.selected_grade = grade
@@ -179,14 +171,16 @@ class SessionManager:
 
     def start_course(self, videos):
         st.session_state.videos = videos
+        subject = self.get_subject()
+        grade = self.get_grade()
         completed_titles = [
             t.split("_", 2)[-1]
             for t in st.session_state.progress["completed_topics"]
-            if t.startswith(f"{self.get_subject()}_{self.get_grade()}_")
+            if t.startswith(f"{subject}_{grade}_")
         ]
         start_index = 0
-        for i, v in enumerate(videos):
-            if v['title'] not in completed_titles:
+        for i, video in enumerate(videos):
+            if video['title'] not in completed_titles:
                 start_index = i
                 break
         st.session_state.current_video_index = start_index
@@ -217,7 +211,10 @@ class SessionManager:
     def get_progress(self):
         return st.session_state.progress
 
-    # ---- scores ----
+    # ---------- Скора и ключи ----------
+    def _topic_key(self, video_title):
+        return f"{self.get_subject()}_{self.get_grade()}_{video_title}"
+
     def save_theory_score(self, topic_key, score):
         if topic_key not in st.session_state.progress["scores"]:
             st.session_state.progress["scores"][topic_key] = {}
@@ -235,62 +232,60 @@ class SessionManager:
         st.session_state.progress["scores"][topic_key]["date"] = datetime.now().isoformat()
         self.save_progress()
 
-    def get_theory_score(self, topic_key=None, video_title=None):
-        """Можно передать готовый topic_key ИЛИ только title (сформируем ключ сами)."""
-        if topic_key is None:
-            if video_title is None:
-                return None
-            topic_key = self.topic_key_for_title(video_title)
+    def get_theory_score(self, video_title_or_topic_key):
+        # принимает и чистый title, и уже собранный topic_key
+        if "_" in video_title_or_topic_key and video_title_or_topic_key.count("_") >= 2:
+            topic_key = video_title_or_topic_key
+        else:
+            topic_key = self._topic_key(video_title_or_topic_key)
         return st.session_state.progress["scores"].get(topic_key, {}).get("theory_score", None)
 
     def get_adaptive_difficulty(self):
-        vids = self.get_videos()
-        if not vids:
-            return "medium"
-        current_video = vids[self.get_current_video_index()]
-        theory_score = self.get_theory_score(video_title=current_video['title'])
+        current_video = self.get_videos()[self.get_current_video_index()]
+        theory_score = self.get_theory_score(current_video['title'])
         if theory_score is None:
             return "medium"
-        if theory_score < 60:
+        elif theory_score < 60:
             return "easy"
-        if theory_score > 85:
+        elif theory_score > 85:
             return "hard"
         return "medium"
 
-    # ---- cleanup ----
     def clear_theory_data(self):
-        for key in ['theory_questions', 'theory_answers']:
-            if key in st.session_state:
-                del st.session_state[key]
+        for k in ['theory_questions', 'theory_answers']:
+            if k in st.session_state:
+                del st.session_state[k]
 
     def clear_practice_data(self):
-        for key in ['practice_tasks', 'task_attempts', 'completed_tasks', 'current_task_type', 'current_task_index']:
-            if key in st.session_state:
-                del st.session_state[key]
-
+        for k in ['practice_tasks', 'task_attempts', 'completed_tasks', 'current_task_type', 'current_task_index']:
+            if k in st.session_state:
+                del st.session_state[k]
 
 def create_progress_chart_data(progress_data):
     scores = progress_data.get("scores", {})
     if not scores:
         return None
-
     data = []
-    for topic_key, info in scores.items():
-        try:
-            subject, grade, topic = topic_key.split("_", 2)
-        except ValueError:
-            subject, grade, topic = "?", "?", topic_key
-        theory = info.get("theory_score", 0)
-        practice = calculate_score(info.get("practice_completed", 0), max(1, info.get("practice_total", 1)))
-        label = f"{subject} {grade} — {topic[:30]}{'...' if len(topic) > 30 else ''}"
-        data.append({"Тема": label, "Теория (%)": theory, "Практика (%)": practice, "Дата": info.get("date", "N/A")})
-
+    for topic_key, score_info in scores.items():
+        subject, grade, topic = topic_key.split("_", 2)
+        theory_score = score_info.get("theory_score", 0)
+        practice_score = calculate_score(
+            score_info.get("practice_completed", 0),
+            score_info.get("practice_total", 1)
+        )
+        data.append({
+            "Тема": f"{subject} {grade} - {topic[:20]}...",
+            "Теория (%)": theory_score,
+            "Практика (%)": practice_score,
+            "Дата": score_info.get("date", "N/A")
+        })
     df = pd.DataFrame(data)
-    fig = px.bar(df, x="Тема", y=["Теория (%)", "Практика (%)"], barmode="group",
-                 title="Прогресс по темам", height=300)
+    fig = px.bar(
+        df, x="Тема", y=["Теория (%)", "Практика (%)"],
+        barmode="group", title="Прогресс по темам", height=300
+    )
     fig.update_layout(yaxis_title="Результат (%)", legend_title="Тип", margin=dict(t=50, b=50))
     return fig
-
 
 def log_user_action(action, details):
     log_entry = {"timestamp": datetime.now().isoformat(), "action": action, "details": details}
