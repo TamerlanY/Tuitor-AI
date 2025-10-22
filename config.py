@@ -54,7 +54,7 @@ APP_CONFIG = {
     "youtube_max_results": 50,
 
     # ===== Теория =====
-    "theory_questions_count": 10,
+    "theory_questions_count": 8,
     "theory_pass_threshold": 60,
 
     # ===== Практика =====
@@ -86,4 +86,5 @@ UI_CONFIG = {
         "hard": "Сложный уровень",
     },
 }
+
 
