@@ -15,7 +15,9 @@ from utils import (
     log_user_action
 )
 
+# =========================
 # set_page_config ДОЛЖЕН быть первым streamlit-вызовом
+# =========================
 st.set_page_config(
     page_title=UI_CONFIG["page_title"],
     page_icon=UI_CONFIG["page_icon"],
@@ -41,7 +43,9 @@ if not YOUTUBE_API_KEY:
 # DeepSeek может быть пустым — тогда генерацию отключим точечно
 DEEPSEEK_ENABLED = bool(DEEPSEEK_API_KEY)
 
+# =========================
 # MathJax
+# =========================
 st.markdown("""
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/MathJax.js?config=TeX-MML-AM_CHTML"></script>
 <script>
@@ -52,7 +56,9 @@ st.markdown("""
 </script>
 """, unsafe_allow_html=True)
 
+# =========================
 # CSS
+# =========================
 st.markdown("""
 <style>
 .main-header { text-align:center; padding:2rem; background:linear-gradient(90deg,#667eea 0%,#764ba2 100%); border-radius:10px; color:#fff; margin-bottom:2rem; }
@@ -68,6 +74,41 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# =========================
+# Помощники
+# =========================
+def _safe_json_from_text(text: str):
+    """
+    Пробует вытащить JSON из ответа модели:
+    1) прямой json.loads
+    2) блок ```json ... ```
+    3) блок ``` ... ```
+    Возвращает dict или выбрасывает JSONDecodeError.
+    """
+    # 1) прямой JSON
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2) тройные кавычки с json
+    m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.S)
+    if m:
+        return json.loads(m.group(1))
+
+    # 3) тройные кавычки без указания типа
+    m = re.search(r"```\s*(\{.*?\})\s*```", text, re.S)
+    if m:
+        return json.loads(m.group(1))
+
+    # ничего не помогло
+    raise json.JSONDecodeError("Cannot parse JSON from model content", text, 0)
+
+
+# =========================
+# Класс приложения
+# =========================
 class EnhancedAITutor:
     def __init__(self):
         self.youtube_api_key = YOUTUBE_API_KEY
@@ -95,12 +136,12 @@ class EnhancedAITutor:
             data = r.json()
             videos = []
             for item in data.get("items", []):
-                sn = item.get("snippet", {})
+                sn = item.get("snippet", {}) or {}
                 thumbs = sn.get("thumbnails", {}) or {}
                 thumb = thumbs.get("high") or thumbs.get("medium") or thumbs.get("default") or {}
                 video = {
                     "title": sn.get("title", "Без названия"),
-                    "video_id": sn.get("resourceId", {}).get("videoId"),
+                    "video_id": (sn.get("resourceId") or {}).get("videoId"),
                     "description": (sn.get("description") or "")[:200] + ("..." if len(sn.get("description") or "") > 200 else ""),
                     "thumbnail": thumb.get("url", ""),
                     "published_at": sn.get("publishedAt", ""),
@@ -122,9 +163,15 @@ class EnhancedAITutor:
             log_user_action("playlist_error", {"error": str(e), "playlist_id": playlist_id})
             return []
 
-    def _call_deepseek_api(self, prompt):
+    def _call_deepseek_api(self, prompt, expect_json=False):
+        """
+        Универсальный вызов DeepSeek.
+        - expect_json=True включает принудительный JSON-режим API + жёсткий парсер ответа.
+        - Возвращает dict. В случае не-JSON может вернуть {"content": "..."}.
+        """
         if not DEEPSEEK_ENABLED:
             return {"error": "deepseek_disabled"}
+
         headers = {"Authorization": f"Bearer {self.deepseek_api_key}", "Content-Type": "application/json"}
         data = {
             "model": self.deepseek_config["model"],
@@ -132,19 +179,38 @@ class EnhancedAITutor:
             "temperature": self.deepseek_config["temperature"],
             "max_tokens": self.deepseek_config["max_tokens"],
         }
+        if expect_json:
+            data["response_format"] = {"type": "json_object"}
+
         for attempt in range(self.deepseek_config["retry_attempts"]):
             try:
-                resp = requests.post("https://api.deepseek.com/v1/chat/completions", headers=headers, json=data, timeout=self.deepseek_config["timeout"])
+                resp = requests.post(
+                    "https://api.deepseek.com/v1/chat/completions",
+                    headers=headers, json=data, timeout=self.deepseek_config["timeout"]
+                )
+
+                # Специально ловим 402 — нет баланса
                 if resp.status_code == 402:
-                    st.warning("DeepSeek вернул 402 (недостаточно средств). Генерация отключена до пополнения.")
+                    st.warning("DeepSeek вернул 402 (недостаточно средств). Генерация временно отключена.")
                     return {"error": "402"}
+
                 resp.raise_for_status()
                 result = resp.json()
                 content = result["choices"][0]["message"]["content"]
-                try:
-                    return json.loads(content)
-                except json.JSONDecodeError:
-                    return {"content": content}
+
+                if expect_json:
+                    # Жёсткая попытка достать JSON
+                    try:
+                        return _safe_json_from_text(content)
+                    except json.JSONDecodeError:
+                        return {"content": content}  # вернём сырец — выше покажем пользователю
+                else:
+                    # Свободный текст
+                    try:
+                        return json.loads(content)
+                    except json.JSONDecodeError:
+                        return {"content": content}
+
             except requests.exceptions.Timeout:
                 if attempt == self.deepseek_config["retry_attempts"] - 1:
                     st.error("Превышено время ожидания ответа от DeepSeek API")
@@ -188,7 +254,7 @@ class EnhancedAITutor:
   ]
 }}
 """
-        return self._call_deepseek_api(prompt)
+        return self._call_deepseek_api(prompt, expect_json=True)
 
     def generate_practice_tasks_enhanced(self, topic, subject, grade, user_performance=None):
         performance_adjustment = ""
@@ -241,16 +307,20 @@ class EnhancedAITutor:
   ]
 }}
 """
-        return self._call_deepseek_api(prompt)
+        return self._call_deepseek_api(prompt, expect_json=True)
 
+
+# =========================
+# Основной поток
+# =========================
 def main():
     st.markdown('<div class="main-header"><h1>📚 AI Тьютор - Персональное обучение</h1></div>', unsafe_allow_html=True)
 
     # ---- USER ID для облачного прогресса ----
     st.sidebar.markdown("### 👤 Пользователь")
     user_id = st.sidebar.text_input("Идентификатор (для облака)", placeholder="например, email или ник")
-    sb_on = bool((SUPABASE_URL or st.secrets.get("SUPABASE_URL", None) if hasattr(st, "secrets") else None) and
-                 (SUPABASE_ANON_KEY or st.secrets.get("SUPABASE_ANON_KEY", None) if hasattr(st, "secrets") else None))
+    sb_on = bool((SUPABASE_URL or (hasattr(st, "secrets") and st.secrets.get("SUPABASE_URL"))) and
+                 (SUPABASE_ANON_KEY or (hasattr(st, "secrets") and st.secrets.get("SUPABASE_ANON_KEY"))))
     if user_id and sb_on:
         st.sidebar.markdown('<span class="badge badge-green">Supabase: подключено</span>', unsafe_allow_html=True)
     else:
@@ -299,6 +369,7 @@ def main():
     else:
         st.info("👆 Выберите предмет и класс в боковой панели, затем нажмите 'Начать обучение'")
 
+
 def display_video_content(tutor, session):
     videos = session.get_videos()
     if not videos:
@@ -339,25 +410,41 @@ def display_video_content(tutor, session):
                 st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
+
 def show_theory_test(tutor, session):
     current_video = session.get_videos()[session.get_current_video_index()]
     st.header("📝 Тест по теории")
     st.info(f"Тема: {current_video['title']}")
+
     if 'theory_questions' not in st.session_state:
         with st.spinner("Генерация вопросов..."):
             difficulty = session.get_adaptive_difficulty()
-            questions_data = tutor.generate_adaptive_questions(current_video['title'], session.get_subject(), session.get_grade(), difficulty)
-            if isinstance(questions_data, dict) and 'content' in questions_data:
-                try:
-                    questions_data = json.loads(questions_data['content'])
-                except Exception:
-                    questions_data = {"questions": []}
-            if isinstance(questions_data, dict) and questions_data.get("error") in ("402", "deepseek_disabled"):
-                st.error("Не удалось сгенерировать вопросы (DeepSeek недоступен).")
+            questions_data = tutor.generate_adaptive_questions(
+                current_video['title'], session.get_subject(), session.get_grade(), difficulty
+            )
+
+            # Явные ошибки API
+            if isinstance(questions_data, dict) and questions_data.get("error") in ("402", "deepseek_disabled", "timeout"):
+                st.error("Не удалось сгенерировать вопросы (DeepSeek недоступен или отключён).")
                 st.session_state.theory_questions = []
             else:
-                st.session_state.theory_questions = questions_data.get('questions', [])
+                # Парсим
+                if isinstance(questions_data, dict) and 'questions' in questions_data:
+                    st.session_state.theory_questions = questions_data.get('questions', [])
+                elif isinstance(questions_data, dict) and 'content' in questions_data:
+                    # пришёл сырой текст — попробуем ещё раз достать JSON
+                    try:
+                        parsed = _safe_json_from_text(questions_data['content'])
+                        st.session_state.theory_questions = parsed.get('questions', [])
+                    except json.JSONDecodeError:
+                        st.error("Модель прислала не-JSON. Ниже — ответ для отладки:")
+                        st.code(questions_data['content'][:1200])
+                        st.session_state.theory_questions = []
+                else:
+                    st.session_state.theory_questions = []
+
             st.session_state.theory_answers = {}
+
     if st.session_state.theory_questions:
         for i, question in enumerate(st.session_state.theory_questions):
             diff = (question.get("difficulty") or "medium").lower()
@@ -370,6 +457,7 @@ def show_theory_test(tutor, session):
             if selected:
                 st.session_state.theory_answers[i] = selected[0]
             st.markdown('</div>', unsafe_allow_html=True)
+
         col1, col2 = st.columns(2)
         with col1:
             if st.button("← Вернуться к видео"):
@@ -385,6 +473,7 @@ def show_theory_test(tutor, session):
                     st.error("Пожалуйста, ответьте на все вопросы")
     else:
         st.error("Не удалось сгенерировать вопросы. Попробуйте снова.")
+
 
 def show_theory_results(tutor, session):
     current_video = session.get_videos()[session.get_current_video_index()]
@@ -424,6 +513,7 @@ def show_theory_results(tutor, session):
             st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
+
 def show_practice_stage(tutor, session):
     current_video = session.get_videos()[session.get_current_video_index()]
     st.header("💪 Практические задания")
@@ -438,17 +528,33 @@ def show_practice_stage(tutor, session):
     if 'practice_tasks' not in st.session_state:
         with st.spinner("Генерация заданий..."):
             theory_score = session.get_theory_score(current_video['title'])
-            tasks_data = tutor.generate_practice_tasks_enhanced(current_video['title'], session.get_subject(), session.get_grade(), theory_score)
-            if isinstance(tasks_data, dict) and 'content' in tasks_data:
-                try:
-                    tasks_data = json.loads(tasks_data['content'])
-                except Exception:
-                    tasks_data = {"easy": [], "medium": [], "hard": []}
-            if isinstance(tasks_data, dict) and tasks_data.get("error") in ("402", "deepseek_disabled"):
+            tasks_data = tutor.generate_practice_tasks_enhanced(
+                current_video['title'], session.get_subject(), session.get_grade(), theory_score
+            )
+
+            # Явные ошибки API
+            if isinstance(tasks_data, dict) and tasks_data.get("error") in ("402", "deepseek_disabled", "timeout"):
                 st.error("Не удалось сгенерировать задания (DeepSeek недоступен).")
                 st.session_state.practice_tasks = {"easy": [], "medium": [], "hard": []}
             else:
-                st.session_state.practice_tasks = tasks_data
+                # Парсим
+                if isinstance(tasks_data, dict) and any(k in tasks_data for k in ("easy", "medium", "hard")):
+                    st.session_state.practice_tasks = tasks_data
+                elif isinstance(tasks_data, dict) and 'content' in tasks_data:
+                    try:
+                        parsed = _safe_json_from_text(tasks_data['content'])
+                        st.session_state.practice_tasks = {
+                            "easy": parsed.get("easy", []),
+                            "medium": parsed.get("medium", []),
+                            "hard": parsed.get("hard", []),
+                        }
+                    except json.JSONDecodeError:
+                        st.error("Модель прислала не-JSON. Ниже — ответ для отладки:")
+                        st.code(tasks_data['content'][:1200])
+                        st.session_state.practice_tasks = {"easy": [], "medium": [], "hard": []}
+                else:
+                    st.session_state.practice_tasks = {"easy": [], "medium": [], "hard": []}
+
             st.session_state.task_attempts = {}
             st.session_state.completed_tasks = []
             st.session_state.current_task_type = 'easy'
@@ -458,6 +564,7 @@ def show_practice_stage(tutor, session):
         show_current_task(tutor, session)
     else:
         st.error("Нет заданий. Попробуйте позже или пополните баланс DeepSeek.")
+
 
 def show_current_task(tutor, session):
     task_types = ['easy', 'medium', 'hard']
@@ -499,7 +606,7 @@ def show_current_task(tutor, session):
             col_check, col_skip = st.columns([1, 1])
             with col_check:
                 if st.button("Проверить ответ", type="primary"):
-                    if user_answer.strip():
+                    if (user_answer or "").strip():
                         check_answer(tutor, session, current_task, user_answer, task_key)
                     else:
                         st.error("Введите ответ!")
@@ -520,6 +627,7 @@ def show_current_task(tutor, session):
                 st.info(hint)
         st.markdown('</div>', unsafe_allow_html=True)
 
+
 def check_answer(tutor, session, task, user_answer, task_key):
     st.session_state.task_attempts[task_key] = st.session_state.task_attempts.get(task_key, 0) + 1
     attempts = st.session_state.task_attempts[task_key]
@@ -538,21 +646,17 @@ def check_answer(tutor, session, task, user_answer, task_key):
         if attempts < max_attempts:
             st.error(f"Неправильно. Попытка {attempts} из {max_attempts}")
             with st.spinner("Получаю подсказку..."):
-                hint = "Подумай, какие свойства применяются к этой формуле."  # fallback если DeepSeek недоступен
-                # если DeepSeek включен — попробуем
+                hint = "Подумай, какие свойства применяются к этой формуле."
+                # если DeepSeek включен — попробуем получить подсказку
                 if DEEPSEEK_ENABLED:
-                    try:
-                        # локальный вызов через tutor.get_hint (там уже обработка ошибок)
-                        hint_resp = tutor._call_deepseek_api(f"""
+                    hint_resp = tutor._call_deepseek_api(f"""
 Студент решал задачу: "{task.get('question','')}"
 Правильный ответ: "{task.get('answer','')}"
 Ответ студента: "{user_answer}"
 Дай краткую подсказку (1-2 предложения) без LaTeX.
-""")
-                        if isinstance(hint_resp, dict) and 'content' in hint_resp:
-                            hint = hint_resp['content']
-                    except Exception:
-                        pass
+                    """, expect_json=False)
+                    if isinstance(hint_resp, dict) and 'content' in hint_resp and hint_resp['content'].strip():
+                        hint = hint_resp['content'].strip()
                 if task_key not in st.session_state:
                     st.session_state[task_key] = {'hints': []}
                 st.session_state[task_key]['hints'].append(hint)
@@ -565,9 +669,11 @@ def check_answer(tutor, session, task, user_answer, task_key):
             if st.button("Следующее задание"):
                 move_to_next_task()
 
+
 def move_to_next_task():
     st.session_state.current_task_index += 1
     st.rerun()
+
 
 def show_practice_completion(tutor, session):
     videos = session.get_videos()
@@ -606,6 +712,7 @@ def show_practice_completion(tutor, session):
             st.rerun()
     st.markdown(generate_progress_report(session.get_progress(), topic_key), unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
+
 
 if __name__ == "__main__":
     main()
