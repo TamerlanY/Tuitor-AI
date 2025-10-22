@@ -68,7 +68,7 @@ DEEPSEEK_CONFIG = {
     "max_tokens_practice": 2800,     # набор практик
 
     # Таймауты
-    "timeout": 30,
+    "timeout": 60,
     "timeout_theory": 45,
     "timeout_practice": 40,
 
@@ -92,3 +92,4 @@ UI_CONFIG = {
 # (опционально) Supabase — если подключал в utils.SessionManager
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+
