@@ -1,17 +1,19 @@
 # config.py
-from dotenv import load_dotenv
 import os
+from dotenv import load_dotenv
 
-# Для локального запуска — читаем .env
+# Загружаем .env локально (на Streamlit Cloud секреты задаются в Secrets/Env)
 load_dotenv()
 
-# ==== Supabase (для облачного сохранения прогресса) ====
-# Эти переменные можно задать в .env или в Streamlit Secrets/Env
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "progress")  # таблица по умолчанию
+# ====== API ключи (берём только из окружения/.env; в app.py есть доп. резолв из st.secrets) ======
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
-# Плейлисты YouTube
+# ====== (опционально) Supabase для облачного прогресса ======
+SUPABASE_URL = os.getenv("SUPABASE_URL")            # пример: https://xxxx.supabase.co
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")  # anon ключ
+
+# ====== Плейлисты ======
 PLAYLISTS = {
     "Алгебра": {
         "7":  "PLCRqj4jDCIYmUtgQCGy3l5GGYbiDBR3p-",
@@ -49,32 +51,39 @@ PLAYLISTS = {
     },
 }
 
-# Конфиг приложения
+# ====== Конфиг приложения ======
 APP_CONFIG = {
     "youtube_max_results": 50,
 
-    # ===== Теория =====
-    "theory_questions_count": 8,
-    "theory_pass_threshold": 60,
+    # Теория: сколько вопросов требуем РОВНО
+    "theory_questions_count": 10,
 
-    # ===== Практика =====
+    # Практика: сколько задач по уровням
     "tasks_per_difficulty": {"easy": 3, "medium": 3, "hard": 2},
+
+    # Сколько попыток на задачу практики
     "max_attempts_per_task": 3,
 
-    # ===== Локальный файл для оффлайн-режима =====
+    # Порог прохождения теории
+    "theory_pass_threshold": 60,
+
+    # Локальный файл прогресса (если нет Supabase)
     "progress_file": "progress.json",
 }
 
-# Конфиг DeepSeek
+# ====== DeepSeek ======
 DEEPSEEK_CONFIG = {
     "model": "deepseek-chat",
     "temperature": 0.5,
-    "max_tokens": 1800,    # базовый (перекрывается по месту вызова)
-    "retry_attempts": 3,
-    "timeout": 25,
+    # Чуть больше токенов, чтобы стабильно умещались 10 теор. вопросов
+    "max_tokens": 2200,
+    # Повторные попытки при таймаутах/сетевых ошибках
+    "retry_attempts": 2,
+    # Таймаут на запрос к LLM
+    "timeout": 18,
 }
 
-# UI
+# ====== UI ======
 UI_CONFIG = {
     "page_title": "AI Тьютор",
     "page_icon": "📚",
@@ -86,5 +95,3 @@ UI_CONFIG = {
         "hard": "Сложный уровень",
     },
 }
-
-
