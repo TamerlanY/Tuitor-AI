@@ -5,6 +5,12 @@ import os
 # Для локального запуска — читаем .env
 load_dotenv()
 
+# ==== Supabase (для облачного сохранения прогресса) ====
+# Эти переменные можно задать в .env или в Streamlit Secrets/Env
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "progress")  # таблица по умолчанию
+
 # Плейлисты YouTube
 PLAYLISTS = {
     "Алгебра": {
@@ -48,24 +54,24 @@ APP_CONFIG = {
     "youtube_max_results": 50,
 
     # ===== Теория =====
-    "theory_questions_count": 10,       # РОВНО столько вопросов сгенерируем
-    "theory_pass_threshold": 60,        # проходной %
+    "theory_questions_count": 10,
+    "theory_pass_threshold": 60,
 
     # ===== Практика =====
     "tasks_per_difficulty": {"easy": 3, "medium": 3, "hard": 2},
     "max_attempts_per_task": 3,
 
-    # ===== Прочее =====
+    # ===== Локальный файл для оффлайн-режима =====
     "progress_file": "progress.json",
 }
 
-# Конфиг DeepSeek (базовый). Реальный max_tokens задаём динамически из app.py под задачу
+# Конфиг DeepSeek
 DEEPSEEK_CONFIG = {
     "model": "deepseek-chat",
     "temperature": 0.5,
-    "max_tokens": 1200,     # базовый — но в коде мы его переопределяем per-call
+    "max_tokens": 1200,    # базовый (перекрывается по месту вызова)
     "retry_attempts": 3,
-    "timeout": 60,          # read timeout
+    "timeout": 60,
 }
 
 # UI
